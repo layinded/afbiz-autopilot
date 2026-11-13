@@ -170,6 +170,7 @@ export function createBusinessTools(store: Store, options: BusinessToolsOptions)
       errorClass: error instanceof Error ? error.name : "Unknown",
       ledgerExtra: { error: message.slice(0, 300) },
     });
+    emitter?.captureError(error, traceId ?? "untraced", { tool, failureCategory: category });
     return {
       ok: false,
       error: "tool_error",

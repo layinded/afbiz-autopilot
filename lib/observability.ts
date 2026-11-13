@@ -46,6 +46,8 @@ const POSTHog_PROPERTIES = new Set([
 
 export interface Emitter {
   emit(event: AfbizEvent, fields: TaskEventFields): Promise<void>;
+  /** Error-tracking signal for PostHog scouts: error class only, never raw input. */
+  captureError(error: unknown, traceId: string, context: { tool?: string; failureCategory?: string }): void;
 }
 
 export function createEmitter(deps: {
@@ -55,7 +57,11 @@ export function createEmitter(deps: {
 }): Emitter {
   const { store, observability, agentVersion } = deps;
 
-  const emit = async (event: AfbizEvent, fields: TaskEventFields): Promise<void> => {
+  const logProblem = (detail: string): void =>
+    logger.warn("posthog_problem", { detail });
+
+  return {
+    emit: async (event: AfbizEvent, fields: TaskEventFields): Promise<void> => {
     const {
       traceId,
       tool,
@@ -99,7 +105,21 @@ export function createEmitter(deps: {
       ...(failureCategory ? { failureCategory } : {}),
       ...(observability?.configured ? { posthog: "forwarded" } : { posthog: "local_only" }),
     });
+    },
+    captureError(error, traceId, context) {
+      if (!observability?.configured) return;
+      const errorClass = error instanceof Error ? error.name : "Unknown";
+      try {
+        observability.captureException(error, traceId, {
+          agentVersion,
+          tool: context.tool ?? null,
+          failureCategory: context.failureCategory ?? null,
+          source: "afbiz-autopilot",
+        });
+        logger.info("observability_error_captured", { traceId, errorClass, tool: context.tool ?? null });
+      } catch (captureProblem) {
+        logProblem(`posthog captureException failure: ${captureProblem instanceof Error ? captureProblem.message : String(captureProblem)}`);
+      }
+    },
   };
-
-  return { emit };
 }

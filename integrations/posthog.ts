@@ -12,6 +12,7 @@ import { PostHog } from "posthog-node";
 export interface PostHogObservability {
   configured: boolean;
   capture(event: string, distinctId: string, properties: Record<string, string | number | boolean>): void;
+  captureException(error: unknown, distinctId: string, properties: Record<string, string | number | boolean | null>): void;
   flush(): Promise<void>;
 }
 
@@ -23,7 +24,12 @@ export function createPostHogObservability(options: {
   const { publicKey, host, onProblem } = options;
   if (!publicKey || publicKey.includes("replace_me")) {
     onProblem?.("posthog not configured (no public key) - local ledger only");
-    return { configured: false, capture: () => undefined, flush: async () => undefined };
+    return {
+      configured: false,
+      capture: () => undefined,
+      captureException: () => undefined,
+      flush: async () => undefined,
+    };
   }
 
   let client: PostHog;
@@ -31,7 +37,12 @@ export function createPostHogObservability(options: {
     client = new PostHog(publicKey, { host });
   } catch (error) {
     onProblem?.(`posthog init failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { configured: false, capture: () => undefined, flush: async () => undefined };
+    return {
+      configured: false,
+      capture: () => undefined,
+      captureException: () => undefined,
+      flush: async () => undefined,
+    };
   }
 
   return {
@@ -43,6 +54,14 @@ export function createPostHogObservability(options: {
         client.capture({ event, distinctId, properties });
       } catch (error) {
         onProblem?.(`posthog capture failure: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    captureException(error, distinctId, properties) {
+      try {
+        client.captureException(error, distinctId, properties);
+        onProblem?.(`error-tracking forwarded (${error instanceof Error ? error.name : "Unknown"})`);
+      } catch (captureProblem) {
+        onProblem?.(`posthog captureException failure: ${captureProblem instanceof Error ? captureProblem.message : String(captureProblem)}`);
       }
     },
     async flush() {

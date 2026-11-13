@@ -100,6 +100,7 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
       }));
 
   const queues = new Map<string, Promise<unknown>>();
+  const lastInbound = new Map<string, { text: string; at: number }>();
   const enqueue = <T>(key: string, fn: () => Promise<T>): Promise<T> => {
     const previous = queues.get(key) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(fn);
@@ -165,6 +166,7 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
       const message = error instanceof Error ? error.message : String(error);
       const category: FailureCategory = classifyProviderFailure(message) === "provider_error" ? "database" : "provider_error";
       logger.error("confirm_apply_failed", { traceId, pendingId: pending.id, tool: pending.tool, error: message });
+      emitter?.captureError(error, traceId, { tool: pending.tool, failureCategory: "database" });
       await emitter?.emit("agent_task_failed", {
         traceId,
         status: "failure",
@@ -180,7 +182,14 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
 
   const handleTextTurn = async (from: string, message: { waMessageId: string; text: string; profileName?: string }): Promise<void> => {
     const traceId = newTraceId();
-    await emitter?.emit("agent_task_started", { traceId, status: "info", outcome: "message" });
+    const previous = lastInbound.get(from);
+    const retry = previous && previous.text === message.text.trim() && Date.now() - previous.at < 600_000;
+    lastInbound.set(from, { text: message.text.trim(), at: Date.now() });
+    await emitter?.emit("agent_task_started", {
+      traceId,
+      status: "info",
+      outcome: retry ? "message_retry" : "message",
+    });
     logger.info("inbound_message", {
       traceId,
       sender: maskPhone(from),
