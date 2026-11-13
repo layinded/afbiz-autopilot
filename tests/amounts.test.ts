@@ -13,6 +13,14 @@ describe("amount parser with baseline config pinned", () => {
     expect(await parseAmount("8,000 ngn")).toMatchObject({ ok: true, value: 8_000 });
   });
 
+  it("parses bare-N Naira prefixes (discovered live in the WhatsApp E2E tests)", async () => {
+    expect((await parseAmount("N45,000")).ok).toBe(true);
+    const result = await parseAmount("N5,000");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe(5_000);
+    expect((await parseAmount("Nova")).ok).toBe(false);
+  });
+
   it("rejects the known 'k' shorthand (seeded limitation for the later improvement demo)", async () => {
     const result = await parseAmount("5k");
     expect(result.ok).toBe(false);
