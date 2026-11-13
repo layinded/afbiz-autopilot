@@ -1,28 +1,44 @@
 /**
- * WhatsApp channel runtime: per-sender serialized turns, bare Confirm/Cancel
- * handling over pending actions, outbound replies via the Graph sender.
- * All user-facing replies are short; every step logs a structured line with a
- * per-inbound trace id.
+ * WhatsApp channel runtime, orchestrating the modules lifted from the proven
+ * afcloud production channel: parser (typed events + instance id), full Graph
+ * sender, security primitives, typing lifecycle manager, conversation ids, and
+ * the error taxonomy for provider-failure replies.
+ *
+ * Per-sender serialized turns, bare Confirm/Cancel over pending actions, and
+ * Phase 3 observability: agent_task_started / completed / failed /
+ * clarification_required events through the emitter (ledger always, PostHog
+ * best-effort, never blocking).
  */
 import type { Agent } from "@voltagent/core";
 import type { Store } from "../../db/store.js";
-import { logger, maskPhone, newTraceId } from "../../lib/config.js";
 import { businessDayRange } from "../../db/store.js";
+import { logger, maskPhone, newTraceId, type WhatsAppConfig } from "../../lib/config.js";
 import { applyConfirmedPending } from "../../tools/index.js";
+import {
+  classifyProviderFailure,
+  recoveryTextFor,
+} from "../../lib/errorTaxonomy.js";
+import { PROVIDER_CATEGORY } from "../../lib/failures.js";
+import { classifyReplyWithoutTool, type FailureCategory } from "../../lib/failures.js";
+import type { Emitter, TaskEventFields } from "../../lib/observability.js";
 import { WhatsAppSender, type SenderConfig } from "./sender.js";
+import { createTypingManager, type TypingManager, type TypingStartContext } from "./typingManager.js";
+import { waConversationId } from "./conversationId.js";
 import { mountWhatsappWebhook, type RouteMount, type WebhookDeps } from "./webhook.js";
 import { runSupervisorTurn, type TurnResult } from "../../agent/turn.js";
 
+const UNAVAILABLE_REPLY =
+  "The assistant is temporarily unavailable. Please try again in a moment - nothing was recorded.";
+
 export interface WhatsAppChannelOptions {
-  verifyToken: string;
-  appSecret: string;
-  sender: SenderConfig;
+  config: WhatsAppConfig;
   maxPayloadBytes: number;
   store: Store;
   supervisor: Agent;
   maxOutputTokens: number;
   requestTimeoutMs: number;
   tzOffsetMinutes: number;
+  emitter?: Emitter;
   /** Injectable for tests; defaults to the real watchdog turn runner. */
   runTurn?: (params: {
     supervisor: Agent;
@@ -39,12 +55,36 @@ export interface WhatsAppChannelOptions {
 
 export interface WhatsAppChannel extends WebhookDeps {
   mount(app: RouteMount): void;
-  handleInbound(message: { kind: "text" | "other"; from: string; waMessageId: string; text?: string; profileName?: string }): Promise<void>;
+  handleInbound(message: {
+    kind: "text" | "button" | "unsupported";
+    from: string;
+    waMessageId: string;
+    text?: string;
+    buttonId?: string;
+    profileName?: string;
+  }): Promise<void>;
   sender: WhatsAppSender;
+  typingManager: TypingManager;
 }
 
 export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsAppChannel {
-  const sender = new WhatsAppSender(options.sender, options.fetchFn ?? fetch);
+  const senderConfig: SenderConfig = options.config;
+  const sender = new WhatsAppSender(senderConfig, options.fetchFn ?? fetch);
+  const typingManager = createTypingManager({
+    sender,
+    config: options.config,
+    emit: (ctx, status, data, detail, durationMs) => {
+      logger.info("typing_event", {
+        conversationId: ctx.conversationId,
+        typing: data.event,
+        reason: data.reason ?? null,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(detail ? { detail } : {}),
+        level: status === "error" ? "warn" : "info",
+      });
+    },
+  });
+  const emitter = options.emitter;
   const runTurn =
     options.runTurn ??
     ((params) =>
@@ -80,39 +120,155 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
     }
   };
 
-  // Meta webhook payloads carry wa_id WITHOUT the leading "+"; owner identity is
-  // canonical E.164-style "+<digits>" everywhere (store rows, pending actions).
-  const normalizePhone = (waId: string): string => (waId.startsWith("+") ? waId : `+${waId}`);
-
-  const handleConfirmation = async (rawFrom: string, word: "confirm" | "cancel"): Promise<void> => {
-    const from = normalizePhone(rawFrom);
+  const handleConfirmation = async (from: string, word: "confirm" | "cancel"): Promise<void> => {
     const traceId = newTraceId();
+    await emitter?.emit("agent_task_started", { traceId, status: "info", outcome: `confirmation_${word}` });
     const pending = await options.store.consumePending(from, word);
     if (!pending) {
       logger.info("confirm_no_pending", { traceId, sender: maskPhone(from), word });
+      await emitter?.emit("agent_task_completed", { traceId, status: "info", outcome: "no_pending_action" });
       await reply(from, "There's nothing pending to confirm or cancel right now.", traceId);
       return;
     }
     if (word === "cancel") {
       logger.info("pending_cancelled", { traceId, sender: maskPhone(from), pendingId: pending.id, tool: pending.tool });
+      await emitter?.emit("agent_task_completed", {
+        traceId,
+        status: "success",
+        tool: pending.tool,
+        outcome: "confirmation_cancelled",
+      });
       await reply(from, "Cancelled. Nothing was recorded.", traceId);
       return;
     }
     logger.info("pending_confirmed", { traceId, sender: maskPhone(from), pendingId: pending.id, tool: pending.tool });
     try {
+      const startedAt = Date.now();
       const applied = await applyConfirmedPending(options.store, pending);
       logger.info("pending_applied", { traceId, pendingId: pending.id, tool: pending.tool, recordId: applied.recordId ?? null });
+      await emitter?.emit("agent_tool_executed", {
+        traceId,
+        tool: pending.tool,
+        status: "success",
+        outcome: "confirmation_applied",
+        durationMs: Date.now() - startedAt,
+      } satisfies TaskEventFields);
+      await emitter?.emit("agent_task_completed", {
+        traceId,
+        status: "success",
+        tool: pending.tool,
+        outcome: "confirmation_applied",
+        durationMs: Date.now() - startedAt,
+      });
       await reply(from, applied.message, traceId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const category: FailureCategory = classifyProviderFailure(message) === "provider_error" ? "database" : "provider_error";
       logger.error("confirm_apply_failed", { traceId, pendingId: pending.id, tool: pending.tool, error: message });
-      await reply(from, "That action couldn't be saved - please restate it and I'll try again.", traceId);
+      await emitter?.emit("agent_task_failed", {
+        traceId,
+        status: "failure",
+        tool: pending.tool,
+        outcome: "confirmation_apply_error",
+        failureCategory: category,
+        errorClass: error instanceof Error ? error.name : "Unknown",
+        ledgerExtra: { error: message.slice(0, 300) },
+      });
+      await reply(from, "That action couldn't be saved - nothing was recorded. Please restate it and try again.", traceId);
+    }
+  };
+
+  const handleTextTurn = async (from: string, message: { waMessageId: string; text: string; profileName?: string }): Promise<void> => {
+    const traceId = newTraceId();
+    await emitter?.emit("agent_task_started", { traceId, status: "info", outcome: "message" });
+    logger.info("inbound_message", {
+      traceId,
+      sender: maskPhone(from),
+      waMessageId: message.waMessageId,
+      preview: message.text.slice(0, 80),
+    });
+
+    const typingStart: TypingStartContext = { conversationId: waConversationId(from), userId: from, runId: traceId };
+    const stopTyping = typingManager.start(message.waMessageId, typingStart);
+
+    try {
+      const today = businessDayRange(new Date(), options.tzOffsetMinutes).date;
+      const turn = await runTurn({
+        supervisor: options.supervisor,
+        userId: from,
+        conversationId: waConversationId(from),
+        message: message.text,
+        traceId,
+        today,
+        maxOutputTokens: options.maxOutputTokens,
+        timeoutMs: options.requestTimeoutMs,
+      });
+      logger.info("turn_completed", { traceId, durationMs: turn.durationMs, settled: turn.settled });
+
+      let text: string;
+      if (turn.settled === "result" && turn.text.trim().length > 0) {
+        text = turn.text.trim();
+      } else {
+        const reason = classifyProviderFailure(turn.settled === "timeout" ? "timed out" : "provider unavailable");
+        text = turn.settled === "timeout" ? recoveryTextFor(reason, undefined) : UNAVAILABLE_REPLY;
+        const category = turn.settled === "timeout" ? PROVIDER_CATEGORY["timeout"] : PROVIDER_CATEGORY["provider_error"];
+        await emitter?.emit("agent_task_failed", {
+          traceId,
+          status: "failure",
+          outcome: turn.settled === "timeout" ? "turn_timeout" : "turn_provider_error",
+          failureCategory: category,
+          durationMs: turn.durationMs,
+          errorClass: turn.settled,
+        });
+      }
+      logger.info("turn_reply", { traceId, replyPreview: text.slice(0, 120), usedFallback: turn.text.trim().length === 0 });
+
+      if (turn.settled === "result" && turn.toolCalls === 0) {
+        const replyClass = classifyReplyWithoutTool(text);
+        if (replyClass === "missing_information") {
+          await emitter?.emit("agent_clarification_required", {
+            traceId,
+            status: "info",
+            outcome: "clarification_request",
+            failureCategory: "missing_information",
+          });
+        } else if (replyClass === "unsupported_request") {
+          await emitter?.emit("agent_task_completed", {
+            traceId,
+            status: "info",
+            outcome: "unsupported_request",
+            durationMs: turn.durationMs,
+          });
+        } else {
+          await emitter?.emit("agent_task_completed", {
+            traceId,
+            status: "success",
+            outcome: "answered",
+            durationMs: turn.durationMs,
+          });
+        }
+      } else if (turn.settled === "result") {
+        await emitter?.emit("agent_task_completed", {
+          traceId,
+          status: "success",
+          outcome: turn.toolCalls === 0 ? "answered" : "tools_ran",
+          durationMs: turn.durationMs,
+        });
+      }
+
+      await reply(from, text, traceId);
+    } finally {
+      stopTyping();
     }
   };
 
   const handleInbound: WhatsAppChannel["handleInbound"] = (message) =>
     enqueue(message.from, async () => {
-      const from = normalizePhone(message.from);
+      const from = message.from.startsWith("+") ? message.from : `+${message.from}`;
+      if (message.kind === "button") {
+        logger.info("inbound_button", { sender: maskPhone(from), waMessageId: message.waMessageId, buttonId: message.buttonId?.slice(0, 30) });
+        return;
+      }
       if (message.kind !== "text" || !message.text) {
         logger.info("inbound_unsupported_type", { sender: maskPhone(from), waMessageId: message.waMessageId });
         return;
@@ -122,46 +278,19 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
         await handleConfirmation(from, normalized);
         return;
       }
-
-      const traceId = newTraceId();
-      logger.info("inbound_message", {
-        traceId,
-        sender: maskPhone(from),
-        waMessageId: message.waMessageId,
-        preview: message.text.slice(0, 80),
-      });
-      void sender.markRead(message.waMessageId); // best-effort
-
-      const today = businessDayRange(new Date(), options.tzOffsetMinutes).date;
-      const turn = await runTurn({
-        supervisor: options.supervisor,
-        userId: from,
-        conversationId: `wa:${from}`,
-        message: message.text,
-        traceId,
-        today,
-        maxOutputTokens: options.maxOutputTokens,
-        timeoutMs: options.requestTimeoutMs,
-      });
-      logger.info("turn_completed", { traceId, durationMs: turn.durationMs, settled: turn.settled });
-
-      const fallback =
-        turn.settled === "result"
-          ? "I couldn't compose an answer just now - please try again."
-          : "My reasoning service is unavailable right now - please try again shortly.";
-      const text = turn.text.trim().length > 0 ? turn.text.trim() : fallback;
-      logger.info("turn_reply", { traceId, replyPreview: text.slice(0, 120), usedFallback: turn.text.trim().length === 0 });
-      await reply(from, text, traceId);
+      await handleTextTurn(from, { waMessageId: message.waMessageId, text: message.text, profileName: message.profileName });
     });
 
   const channel: WhatsAppChannel = {
-    verifyToken: options.verifyToken,
-    appSecret: options.appSecret,
+    verifyToken: options.config.verifyToken,
+    appSecret: options.config.appSecret,
+    phoneNumberId: options.config.phoneNumberId,
     maxPayloadBytes: options.maxPayloadBytes,
     claimReceipt: (id, kind, preview) => options.store.claimReceipt(id, kind, preview),
     markReceipt: (id, status) => options.store.markReceipt(id, status),
     handleInbound,
     sender,
+    typingManager,
     mount(app: RouteMount): void {
       mountWhatsappWebhook(app, channel);
     },

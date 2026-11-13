@@ -61,7 +61,7 @@ async function main(): Promise<void> {
             field: "messages",
             value: {
               messaging_product: "whatsapp",
-              metadata: { display_phone_number: "2349000000000", phone_number_id: "DEV_PHONE_NUMBER_ID" },
+              metadata: { display_phone_number: "2349000000000", phone_number_id: process.env["WHATSAPP_PHONE_NUMBER_ID"]?.trim() || "DEV_PHONE_ID" },
               contacts: [{ profile: { name: "Dev Sender" }, wa_id: args.from.replace(/^\+/, "") }],
               messages: [
                 {

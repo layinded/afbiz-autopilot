@@ -24,6 +24,7 @@ export interface TurnResult {
   text: string;
   durationMs: number;
   settled: "result" | "error" | "timeout";
+  toolCalls: number;
 }
 
 type Settled =
@@ -57,24 +58,28 @@ export async function runSupervisorTurn(params: TurnParams): Promise<TurnResult>
 
     const outcome = (await Promise.race([opPromise, timeoutPromise])) as Settled;
     if (outcome.kind === "timeout") {
-      return { text: "", durationMs: Date.now() - startedAt, settled: "timeout" };
+      return { text: "", durationMs: Date.now() - startedAt, settled: "timeout", toolCalls: 0 };
     }
     if (outcome.kind === "error") {
       const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
       logger.error("turn_failed", { traceId: params.traceId, error: message.slice(0, 300) });
-      return { text: "", durationMs: Date.now() - startedAt, settled: "error" };
+      return { text: "", durationMs: Date.now() - startedAt, settled: "error", toolCalls: 0 };
     }
 
     let toolCalls = 0;
+    const seenCallIds = new Set<string>();
     for await (const part of outcome.result.fullStream as AsyncIterable<VoltAgentTextStreamPart>) {
       if (part.type === "tool-call") {
+        const callId = (part as { toolCallId?: string }).toolCallId ?? "unknown";
+        if (seenCallIds.has(callId)) continue;
+        seenCallIds.add(callId);
         toolCalls += 1;
         logger.info("agent_tool_call", { traceId: params.traceId, toolName: (part as { toolName?: string }).toolName });
       }
     }
     const text = (await outcome.result.text) ?? "";
     logger.info("turn_text_ready", { traceId: params.traceId, toolCalls });
-    return { text, durationMs: Date.now() - startedAt, settled: "result" };
+    return { text, durationMs: Date.now() - startedAt, settled: "result", toolCalls };
   } finally {
     clearTimeout(watchdog);
   }

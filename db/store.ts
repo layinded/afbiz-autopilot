@@ -76,6 +76,33 @@ export function businessDayRange(now: Date, tzOffsetMinutes: number): { from: Da
 
 export type ReceiptClaim = "claimed" | "duplicate";
 
+export interface LedgerEntry {
+  traceId: string;
+  event: string;
+  tool?: string;
+  agentVersion: string;
+  status: "success" | "failure" | "info";
+  outcome?: string;
+  failureCategory?: string;
+  durationMs?: number;
+  improvementVersion?: string;
+  errorClass?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface LedgerRow {
+  trace_id: string;
+  event: string;
+  tool: string | null;
+  agent_version: string;
+  status: string;
+  outcome: string | null;
+  failure_category: string | null;
+  duration_ms: number | null;
+  error_class: string | null;
+  created_at: Date;
+}
+
 /**
  * postgres.js hands jsonb columns back as a parsed object in some query shapes
  * and as a raw string through RETURNING - normalize both to an object.
@@ -248,6 +275,54 @@ export function createStore(sql: PgClient) {
         )
         RETURNING id, owner_phone, tool, payload, summary, status`;
       return (rows[0] as unknown as Record<string, unknown> | undefined) ? normalizePendingRow(rows[0] as unknown as Record<string, unknown>) : null;
+    },
+
+    // --- Local event ledger ---
+    async recordEventLedger(entry: LedgerEntry): Promise<void> {
+      await sql`
+        INSERT INTO event_ledger
+          (trace_id, event, tool, agent_version, status, outcome, failure_category, duration_ms, improvement_version, error_class, payload)
+        VALUES (
+          ${entry.traceId}, ${entry.event}, ${entry.tool ?? null}, ${entry.agentVersion}, ${entry.status},
+          ${entry.outcome ?? null}, ${entry.failureCategory ?? null}, ${entry.durationMs ?? null},
+          ${entry.improvementVersion ?? null}, ${entry.errorClass ?? null}, ${JSON.stringify(entry.payload ?? {})}::jsonb
+        )`;
+    },
+
+    async recentFailures(limit = 20): Promise<LedgerRow[]> {
+      const rows = await sql`
+        SELECT trace_id, event, tool, agent_version, status, outcome, failure_category, duration_ms, error_class, created_at
+        FROM event_ledger
+        WHERE failure_category IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT ${limit}`;
+      return rows as unknown as LedgerRow[];
+    },
+
+    async failureCategoryCounts(hours = 24): Promise<{ category: string; count: number }[]> {
+      const rows = await sql`
+        SELECT failure_category AS category, COUNT(*) AS count
+        FROM event_ledger
+        WHERE failure_category IS NOT NULL AND created_at > now() - ${`${hours} hours`}::interval
+        GROUP BY failure_category
+        ORDER BY count DESC`;
+      return rows.map((row) => ({
+        category: String((row as Record<string, unknown>)["category"]),
+        count: Number((row as Record<string, unknown>)["count"]),
+      }));
+    },
+
+    async eventCounts(hours = 24): Promise<{ event: string; count: number }[]> {
+      const rows = await sql`
+        SELECT event, COUNT(*) AS count
+        FROM event_ledger
+        WHERE created_at > now() - ${`${hours} hours`}::interval
+        GROUP BY event
+        ORDER BY count DESC`;
+      return rows.map((row) => ({
+        event: String((row as Record<string, unknown>)["event"]),
+        count: Number((row as Record<string, unknown>)["count"]),
+      }));
     },
   };
 }

@@ -1,78 +1,82 @@
-/**
- * Meta Cloud API webhook payload parsing into normalized events:
- * text messages (the only type the MVP agent handles), other message types
- * (receipt claimed, no agent work), and delivery/read statuses (ignored).
- */
-export interface InboundTextMessage {
-  kind: "text";
-  from: string;
-  waMessageId: string;
-  text: string;
-  profileName?: string;
-}
+/** Webhook body splitting: messages / interactive replies / statuses / unsupported.
+ *  Lifted from the proven afcloud-business agent channel. */
+import type {
+  ParsedInboundMessage,
+  ParsedStatus,
+  ParsedWebhookEvent,
+  WhatsAppWebhookBody,
+} from "./types.js";
 
-export interface InboundOtherMessage {
-  kind: "other";
-  from: string;
-  waMessageId: string;
-}
-
-export type WebhookEvent =
-  | { kind: "message"; message: InboundTextMessage | InboundOtherMessage }
-  | { kind: "status"; waMessageId: string; status: string }
-  | { kind: "ignored" };
-
-export function parseWebhookBodyJson(raw: string): unknown | null {
-  try {
-    return JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-export function parseWebhookEvents(body: unknown): WebhookEvent[] {
-  const events: WebhookEvent[] = [];
-  const root = body as { entry?: unknown } | null;
-  const entries = Array.isArray(root?.entry) ? root.entry : [];
-  for (const entry of entries) {
-    const changes = (entry as { changes?: unknown }).changes;
-    const changeList = Array.isArray(changes) ? changes : [];
-    for (const change of changeList) {
-      const value = (change as { value?: unknown }).value as
-        | { messages?: unknown; statuses?: unknown; contacts?: unknown }
-        | undefined;
-      if (!value) {
-        events.push({ kind: "ignored" });
-        continue;
-      }
-      const profileName = Array.isArray(value.contacts)
-        ? ((value.contacts as { profile?: { name?: string } }[])[0]?.profile?.name ?? undefined)
-        : undefined;
-      const messages = Array.isArray(value.messages) ? value.messages : [];
-      for (const raw of messages as { id?: string; from?: string; type?: string; text?: { body?: string } }[]) {
-        if (!raw.id || !raw.from) {
-          events.push({ kind: "ignored" });
-          continue;
-        }
-        if (raw.type === "text" && typeof raw.text?.body === "string") {
-          events.push({
-            kind: "message",
-            message: { kind: "text", from: raw.from, waMessageId: raw.id, text: raw.text.body, ...(profileName ? { profileName } : {}) },
-          });
-        } else {
-          events.push({ kind: "message", message: { kind: "other", from: raw.from, waMessageId: raw.id } });
+export function parseWebhookEvents(body: WhatsAppWebhookBody): ParsedWebhookEvent[] {
+  const events: ParsedWebhookEvent[] = [];
+  for (const entry of body.entry ?? []) {
+    for (const change of entry.changes ?? []) {
+      const value = change.value;
+      if (!value) continue;
+      const profileNames = new Map<string, string>();
+      for (const contact of value.contacts ?? []) {
+        if (typeof contact.wa_id === "string" && contact.profile?.name) {
+          profileNames.set(contact.wa_id, contact.profile.name);
         }
       }
-      const statuses = Array.isArray(value.statuses) ? value.statuses : [];
-      for (const raw of statuses as { id?: string; status?: string }[]) {
-        if (!raw.id || !raw.status) {
-          events.push({ kind: "ignored" });
-          continue;
-        }
-        events.push({ kind: "status", waMessageId: raw.id, status: raw.status });
+      for (const message of value.messages ?? []) {
+        events.push({
+          kind: "message",
+          phoneNumberId: value.metadata?.phone_number_id ?? "",
+          message: parseMessage(message),
+          profileName: profileNames.get(message.from),
+        });
+      }
+      for (const status of value.statuses ?? []) {
+        // Unattributable statuses (no recipient) are transport noise — not claimable.
+        const from = typeof status.recipient_id === "string" ? status.recipient_id : "";
+        if (!from) continue;
+        const parsed: ParsedStatus = { kind: "status", waMessageId: status.id, status: status.status, from };
+        events.push({ kind: "status", status: parsed });
       }
     }
   }
   if (events.length === 0) events.push({ kind: "ignored" });
   return events;
+}
+
+function parseMessage(message: {
+  from: string;
+  id: string;
+  type: string;
+  text?: { body?: string };
+  interactive?: {
+    type?: string;
+    button_reply?: { id?: string; title?: string };
+    list_reply?: { id?: string; title?: string };
+  };
+}): ParsedInboundMessage {
+  if (message.type === "text" && typeof message.text?.body === "string") {
+    return { kind: "text", waMessageId: message.id, from: message.from, text: message.text.body };
+  }
+  if (message.type === "interactive") {
+    const reply = message.interactive?.button_reply ?? message.interactive?.list_reply;
+    if (reply && typeof reply.id === "string") {
+      return {
+        kind: "button",
+        waMessageId: message.id,
+        from: message.from,
+        buttonId: reply.id,
+        buttonTitle: reply.title ?? "",
+      };
+    }
+  }
+  return { kind: "unsupported", waMessageId: message.id, from: message.from, type: message.type ?? "unknown" };
+}
+
+export function parseWebhookBodyJson(text: string): WhatsAppWebhookBody {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && "entry" in (parsed as Record<string, unknown>)) {
+      return parsed as WhatsAppWebhookBody;
+    }
+  } catch {
+    // fallthrough
+  }
+  return {};
 }

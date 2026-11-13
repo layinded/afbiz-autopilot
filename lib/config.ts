@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 /**
  * Environment resolution with fail-closed gates.
@@ -16,6 +17,9 @@ export interface WhatsAppConfig {
   graphBaseUrl: string;
   graphVersion: string;
   graphTimeoutMs: number;
+  typingIndicator: boolean;
+  typingRefreshMs: number;
+  typingMaxMs: number;
 }
 
 export interface AppConfig {
@@ -28,10 +32,12 @@ export interface AppConfig {
   requestTimeoutMs: number;
   maxPayloadBytes: number;
   memoryDbUrl: string;
+  agentVersion: string;
   modelProvider: "openai-compatible" | "ollama";
   modelBaseUrl: string;
   modelName: string;
   modelApiKey?: string;
+  posthog?: { publicKey: string; host: string };
   whatsapp?: WhatsAppConfig;
 }
 
@@ -82,6 +88,9 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): {
       graphBaseUrl: env["WHATSAPP_GRAPH_BASE_URL"] ?? "https://graph.facebook.com",
       graphVersion: env["WHATSAPP_GRAPH_VERSION"] ?? "v23.0",
       graphTimeoutMs: num(env["WHATSAPP_GRAPH_TIMEOUT_MS"], 15_000),
+      typingIndicator: env["WHATSAPP_TYPING_INDICATOR"] === "1",
+      typingRefreshMs: num(env["WHATSAPP_TYPING_REFRESH_MS"], 20_000),
+      typingMaxMs: num(env["WHATSAPP_TYPING_MAX_MS"], 120_000),
     };
   } else {
     whatsappDisabledReason =
@@ -89,6 +98,15 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): {
         ? "WHATSAPP_ENABLED!=1"
         : "missing WHATSAPP_VERIFY_TOKEN / APP_SECRET / ACCESS_TOKEN / PHONE_NUMBER_ID";
   }
+
+  const posthogPublicKey = env["POSTHOG_PUBLIC_KEY"]?.trim();
+  const posthogHost = env["POSTHOG_HOST"]?.trim() ?? "https://us.i.posthog.com";
+  const posthog =
+    posthogPublicKey && !posthogPublicKey.includes("replace_me")
+      ? { publicKey: posthogPublicKey, host: posthogHost }
+      : undefined;
+
+  const agentVersion = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
   return {
     config: {
@@ -101,10 +119,12 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): {
       requestTimeoutMs: num(env["REQUEST_TIMEOUT_MS"], 90_000),
       maxPayloadBytes: num(env["WHATSAPP_MAX_PAYLOAD_BYTES"], 1_048_576),
       memoryDbUrl: env["MEMORY_DB_URL"] ?? "file:./.voltagent/memory.db",
+      agentVersion,
       modelProvider,
       modelBaseUrl,
       modelName,
       modelApiKey,
+      posthog,
       whatsapp,
     },
     whatsappDisabledReason,

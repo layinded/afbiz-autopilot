@@ -50,7 +50,14 @@ export function statusEventPayload(waMessageId: string, status: string): Record<
             value: {
               messaging_product: "whatsapp",
               metadata: { display_phone_number: "2349000000000", phone_number_id: "TEST_PHONE_ID" },
-              statuses: [{ id: waMessageId, status, timestamp: String(Math.floor(Date.now() / 1000)) }],
+              statuses: [
+                {
+                  id: waMessageId,
+                  status,
+                  timestamp: String(Math.floor(Date.now() / 1000)),
+                  recipient_id: "2349000000001",
+                },
+              ],
             },
           },
         ],

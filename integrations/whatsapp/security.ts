@@ -1,6 +1,6 @@
 /**
- * Webhook security primitives - pattern-level port of the proven
- * implementations in the reference repos (AFBiz laws N-WA-1/2/9/12):
+ * Webhook security primitives, pattern-level port of the AFBiz production
+ * channel laws (N-WA-1/2/9/12), lifted from the proven afcloud-business agent:
  * HMAC over the EXACT raw request bytes, `sha256=` prefix gate,
  * constant-time compares, verify-before-parse, appsecret_proof on Graph calls.
  */

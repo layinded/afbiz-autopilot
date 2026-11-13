@@ -41,26 +41,28 @@ function buildHarness(maxPayloadBytes = 65_536, turnText = "Okay — recorded.")
   let turnCalls = 0;
   const app = new Hono();
   const channel = createWhatsAppChannel({
-    verifyToken: VERIFY_TOKEN,
-    appSecret: APP_SECRET,
-    sender: {
-      accessToken: "test_token",
+    config: {
+      verifyToken: VERIFY_TOKEN,
       appSecret: APP_SECRET,
+      accessToken: "test_token",
       phoneNumberId: "TEST_PHONE_ID",
       graphBaseUrl: "https://graph.invalid",
       graphVersion: "v23.0",
       graphTimeoutMs: 5_000,
+      typingIndicator: false,
+      typingRefreshMs: 200,
+      typingMaxMs: 1_000,
     },
     maxPayloadBytes,
     store: createStore(getSql()),
-    supervisor: {} as unknown as Agent, // unused: runTurn is injected
+    supervisor: {} as unknown as Agent,
     maxOutputTokens: 100,
     requestTimeoutMs: 5_000,
     tzOffsetMinutes: 60,
     runTurn: async (params) => {
       turnCalls += 1;
       turnMessages.push(params.message);
-      return { text: turnText, durationMs: 1, settled: "result" };
+      return { text: turnText, durationMs: 1, settled: "result", toolCalls: 1 };
     },
     fetchFn: (async (_url: unknown, init?: { body?: string }) => {
       sent.push(init?.body ?? "");

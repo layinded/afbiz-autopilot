@@ -23,7 +23,7 @@ export async function setupTestDb(): Promise<void> {
 
 export async function truncateAll(): Promise<void> {
   await getSql().unsafe(
-    "TRUNCATE customers, sales, expenses, debts, pending_actions, webhook_receipts",
+    "TRUNCATE customers, sales, expenses, debts, pending_actions, webhook_receipts, event_ledger",
   );
 }
 

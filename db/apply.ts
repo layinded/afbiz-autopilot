@@ -17,6 +17,7 @@ export const SCHEMA_TABLES = [
   "debts",
   "pending_actions",
   "webhook_receipts",
+  "event_ledger",
 ] as const;
 
 export async function applySchema(sql: PgClient): Promise<number> {

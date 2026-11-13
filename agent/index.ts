@@ -18,6 +18,8 @@ import { createStore } from "../db/store.js";
 import { createBusinessTools } from "../tools/index.js";
 import { createSupervisorAgent, supervisorInstructions } from "./agent.js";
 import { createChatModel } from "./model.js";
+import { createPostHogObservability } from "../integrations/posthog.js";
+import { createEmitter } from "../lib/observability.js";
 import { createWhatsAppChannel } from "../integrations/whatsapp/channel.js";
 
 export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Promise<void> }> {
@@ -27,11 +29,22 @@ export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Pro
   const sql = createDb(config.databaseUrl);
   const store = createStore(sql);
   await store.probe();
-  logger.info("db_connected", { databaseHost: new URL(config.databaseUrl).host });
+  logger.info("db_connected", { databaseHost: new URL(config.databaseUrl).host, agentVersion: config.agentVersion });
+
+  const observability = createPostHogObservability({
+    publicKey: config.posthog?.publicKey,
+    host: config.posthog?.host ?? "https://us.i.posthog.com",
+    onProblem: (detail) => logger.warn("posthog_problem", { detail }),
+  });
+  const emitter = createEmitter({ store, observability, agentVersion: config.agentVersion });
+  logger.info("observability_ready", {
+    posthog: observability.configured ? `configured:${config.posthog?.host}` : "local_ledger_only",
+  });
 
   const { tools } = createBusinessTools(store, {
     confirmAmountThreshold: config.confirmAmountThreshold,
     tzOffsetMinutes: config.tzOffsetMinutes,
+    emitter,
   });
 
   const memory = new Memory({
@@ -50,15 +63,14 @@ export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Pro
 
   const channel = config.whatsapp
     ? createWhatsAppChannel({
-        verifyToken: config.whatsapp.verifyToken,
-        appSecret: config.whatsapp.appSecret,
-        sender: config.whatsapp,
+        config: config.whatsapp,
         maxPayloadBytes: config.maxPayloadBytes,
         store,
         supervisor,
         maxOutputTokens: config.maxOutputTokens,
         requestTimeoutMs: config.requestTimeoutMs,
         tzOffsetMinutes: config.tzOffsetMinutes,
+        emitter,
       })
     : undefined;
 
@@ -86,6 +98,7 @@ export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Pro
   return {
     voltagent,
     dispose: async () => {
+      await observability.flush();
       await voltagent.stopServer();
       await sql.end({ timeout: 5 });
     },
