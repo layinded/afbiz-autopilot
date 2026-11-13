@@ -43,6 +43,7 @@ export function isValidParserConfig(config: unknown): config is AmountParserConf
 export const ACTIVE_CONFIG_TTL_MS = 5_000;
 
 let override: AmountParserConfig | undefined;
+let cacheVersion: string | null = null;
 let cached: { config: AmountParserConfig; fetchedAt: number } | null = null;
 let storeRef: Store | null = null;
 
@@ -50,6 +51,7 @@ let storeRef: Store | null = null;
 export function bindParserConfigStore(store: Store | null): void {
   storeRef = store;
   cached = null;
+  cacheVersion = null;
 }
 
 /** Test hook: pin a config; undefined clears the pin (store pointer resumes). */
@@ -58,11 +60,24 @@ export function setActiveParserOverride(config: AmountParserConfig | undefined):
   cached = null;
 }
 
+export async function getActiveParserVersionLabel(): Promise<string> {
+  if (storeRef && (!cached || Date.now() - cached["fetchedAt"] >= ACTIVE_CONFIG_TTL_MS)) {
+    try {
+      const version = await storeRef.getActiveParserVersion("amount_parser");
+      cacheVersion = version;
+    } catch {
+      cacheVersion = cacheVersion ?? "parser_v1";
+    }
+  }
+  return cacheVersion ?? "parser_v1";
+}
+
 export async function getActiveParserConfig(): Promise<AmountParserConfig> {
   if (override !== undefined) return override;
   if (storeRef && (!cached || Date.now() - cached.fetchedAt >= ACTIVE_CONFIG_TTL_MS)) {
     try {
       const raw = await storeRef.getActiveParserConfig("amount_parser");
+      cacheVersion = await storeRef.getActiveParserVersion("amount_parser");
       if (isValidParserConfig(raw)) {
         cached = { config: raw, fetchedAt: Date.now() };
       } else if (!cached) {
