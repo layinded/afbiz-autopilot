@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+# Env files - never commit credentials
+.env
+.env.local
+.env.*.local
+
+# Local agent state / databases
+.voltagent/
+.data/
+
+# OS / editor junk
+.DS_Store
+.idea/
+*.log
