@@ -20,6 +20,7 @@ import {
 } from "../../lib/errorTaxonomy.js";
 import { PROVIDER_CATEGORY } from "../../lib/failures.js";
 import { classifyReplyWithoutTool, type FailureCategory } from "../../lib/failures.js";
+import { getActiveParserVersionLabel } from "../../lib/parser-config.js";
 import type { Emitter, TaskEventFields } from "../../lib/observability.js";
 import { WhatsAppSender, type SenderConfig } from "./sender.js";
 import { createTypingManager, type TypingManager, type TypingStartContext } from "./typingManager.js";
@@ -33,6 +34,7 @@ const UNAVAILABLE_REPLY =
 export interface WhatsAppChannelOptions {
   config: WhatsAppConfig;
   maxPayloadBytes: number;
+  demoMode?: boolean;
   store: Store;
   supervisor: Agent;
   maxOutputTokens: number;
@@ -84,7 +86,23 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
       });
     },
   });
-  const emitter = options.emitter;
+  const demoMode = options.demoMode === true;
+  const rawEmitter = options.emitter;
+  const emitter: Emitter | undefined = rawEmitter
+    ? {
+        emit: async (event, fields): Promise<void> => {
+          if (demoMode) {
+            const parserVersion = await getActiveParserVersionLabel();
+            await rawEmitter.emit(event, { ...fields, demoMode: true, parserVersion });
+          } else {
+            await rawEmitter.emit(event, fields);
+          }
+        },
+        captureError: (error, traceId, context): void => {
+          rawEmitter.captureError(error, traceId, context);
+        },
+      }
+    : undefined;
   const runTurn =
     options.runTurn ??
     ((params) =>

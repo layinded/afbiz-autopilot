@@ -23,6 +23,8 @@ export type EventStatus = "success" | "failure" | "info";
 
 export interface TaskEventFields {
   traceId: string;
+  parserVersion?: string;
+  demoMode?: boolean;
   tool?: string;
   status: EventStatus;
   outcome?: string;
@@ -35,6 +37,8 @@ export interface TaskEventFields {
 }
 
 const POSTHog_PROPERTIES = new Set([
+  "parserVersion",
+  "demoMode",
   "tool",
   "agentVersion",
   "outcome",

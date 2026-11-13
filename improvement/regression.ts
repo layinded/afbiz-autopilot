@@ -19,6 +19,8 @@ export const REQUIRED_REGRESSION_CASES: RegressionCase[] = [
   { name: "naira grouped", input: "₦5,000", expected: { ok: true, value: 5_000 } },
   { name: "plain integer", input: "5000", expected: { ok: true, value: 5_000 } },
   { name: "decimal", input: "₦12,000.50", expected: { ok: true, value: 12_000.5 } },
+  { name: "bare N prefix", input: "N45,000", expected: { ok: true, value: 45_000 } },
+  { name: "bare N prefix decimal", input: "N5,000", expected: { ok: true, value: 5_000 } },
   { name: "existing successful form", input: "₦45,000", expected: { ok: true, value: 45_000 } },
   { name: "ambiguous text is still refused", input: "some rice", expected: { ok: false, mustFail: true } },
   { name: "negative refused", input: "-12", expected: { ok: false, mustFail: true } },

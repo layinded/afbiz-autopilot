@@ -43,6 +43,7 @@ function normalizeForm(trimmed: string): { digits: string; currencyFail?: Parsed
   }
   s = s.replace(/^₦\s*/u, "");
   s = s.replace(/^NGN\s*/i, "").replace(/\s*NGN$/i, "");
+  s = s.replace(/^N(?=\d)/, "");
   s = s.replaceAll(",", "").replaceAll(/\s+/g, "");
   return { digits: s };
 }

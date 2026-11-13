@@ -33,6 +33,7 @@ export interface AppConfig {
   maxPayloadBytes: number;
   memoryDbUrl: string;
   agentVersion: string;
+  demoMode: boolean;
   modelProvider: "openai-compatible" | "ollama";
   modelBaseUrl: string;
   modelName: string;
@@ -111,6 +112,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): {
   return {
     config: {
       port,
+      demoMode: env["DEMO_MODE"] === "1",
       databaseUrl,
       businessTimezone,
       tzOffsetMinutes,
