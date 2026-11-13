@@ -15,7 +15,8 @@
     "improve": "tsx --env-file-if-exists=.env scripts/improve.ts",
     "approve": "tsx --env-file-if-exists=.env scripts/approve.ts",
     "rollback": "tsx --env-file-if-exists=.env scripts/rollback.ts",
-    "traffic": "tsx --env-file-if-exists=.env scripts/signal-traffic.ts"
+    "traffic": "tsx --env-file-if-exists=.env scripts/signal-traffic.ts",
+    "observe": "tsx --env-file-if-exists=.env scripts/live-observe.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.13",
