@@ -2,6 +2,9 @@ node_modules/
 dist/
 coverage/
 
+# Documentation lives on disk for the engineer; not tracked in git (per engineer rule)
+*.md
+
 # Env files - never commit credentials
 .env
 .env.local

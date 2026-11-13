@@ -7,7 +7,10 @@
   "scripts": {
     "smoke": "tsx scripts/smoke.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch --env-file-if-exists=.env agent/index.ts",
+    "start": "tsx --env-file-if-exists=.env agent/index.ts",
+    "db:setup": "tsx --env-file-if-exists=.env scripts/db-setup.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.13",
