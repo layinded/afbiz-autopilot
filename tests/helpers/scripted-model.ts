@@ -4,6 +4,7 @@
 import type {
   LanguageModelV3,
   LanguageModelV3CallOptions,
+  LanguageModelV3GenerateResult,
   LanguageModelV3StreamPart,
   LanguageModelV3StreamResult,
   LanguageModelV3Usage,
@@ -80,12 +81,14 @@ export function textStep(text: string, usage: LanguageModelV3Usage = DEFAULT_USA
 
 export interface ScriptedModel extends LanguageModelV3 {
   push(steps: LanguageModelV3StreamResult[]): void;
+  pushGenerate(texts: string[]): void;
   pushedCalls: number;
   consumedCalls: number;
 }
 
 export function createScriptedModel(initial: LanguageModelV3StreamResult[] = []): ScriptedModel {
   let queue: LanguageModelV3StreamResult[] = [];
+  const generateQueue: string[] = [];
   const model: ScriptedModel = {
     provider: "scripted-afbiz",
     modelId: "scripted-model-v3",
@@ -96,6 +99,9 @@ export function createScriptedModel(initial: LanguageModelV3StreamResult[] = [])
     push(steps: LanguageModelV3StreamResult[]): void {
       queue.push(...steps);
       model.pushedCalls += steps.length;
+    },
+    pushGenerate(texts: string[]): void {
+      generateQueue.push(...texts);
     },
     async doStream(_callOptions: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
       model.consumedCalls += 1;
@@ -108,8 +114,18 @@ export function createScriptedModel(initial: LanguageModelV3StreamResult[] = [])
       }
       return step;
     },
-    async doGenerate(): Promise<never> {
-      throw new Error("doGenerate not scripted; the stack uses streamText");
+    async doGenerate(_callOptions: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
+      model.consumedCalls += 1;
+      const text = generateQueue.shift();
+      if (text === undefined) {
+        throw new Error("scripted generate queue exhausted");
+      }
+      return {
+        content: [{ type: "text", text }],
+        finishReason: { unified: "stop", raw: "stop" } as never,
+        usage: DEFAULT_USAGE,
+        warnings: [],
+      };
     },
   };
   model.push(initial);

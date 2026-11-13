@@ -88,3 +88,46 @@ CREATE TABLE IF NOT EXISTS event_ledger (
 );
 CREATE INDEX IF NOT EXISTS event_ledger_created_idx ON event_ledger (created_at);
 CREATE INDEX IF NOT EXISTS event_ledger_category_idx ON event_ledger (failure_category);
+
+-- Self-improvement versioning (Phase 4): only allowlisted config kinds and
+-- versions live here; the running agent consumes the active pointer through a
+-- TTL cache, so activation never needs a restart. Improvement proposals and
+-- their approval decisions are versioned and audited.
+CREATE TABLE IF NOT EXISTS parse_configs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  version TEXT NOT NULL UNIQUE,
+  config JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS active_config (
+  config_kind TEXT PRIMARY KEY,
+  active_version TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS improvement_proposals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  version TEXT NOT NULL,
+  config JSONB NOT NULL,
+  rationale TEXT NOT NULL,
+  evidence JSONB NOT NULL,
+  diagnosis TEXT NOT NULL,
+  tests_passed BOOLEAN NOT NULL,
+  test_report JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'discarded')),
+  approval_token_hash TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS improvement_audit (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  action TEXT NOT NULL,
+  version TEXT,
+  proposal_id UUID,
+  actor TEXT NOT NULL,
+  detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

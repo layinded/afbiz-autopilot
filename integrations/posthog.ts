@@ -48,6 +48,7 @@ export function createPostHogObservability(options: {
     async flush() {
       try {
         await client.shutdown();
+        onProblem?.("posthog flushed: queued events delivered");
       } catch (error) {
         onProblem?.(`posthog flush failure: ${error instanceof Error ? error.message : String(error)}`);
       }

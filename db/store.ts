@@ -76,6 +76,19 @@ export function businessDayRange(now: Date, tzOffsetMinutes: number): { from: Da
 
 export type ReceiptClaim = "claimed" | "duplicate";
 
+export interface ProposalRow {
+  id: string;
+  version: string;
+  config: Record<string, unknown>;
+  rationale: string;
+  evidence: Record<string, unknown>;
+  diagnosis: string;
+  tests_passed: boolean;
+  test_report: Record<string, unknown>;
+  status: "pending" | "approved" | "rejected" | "discarded";
+  approval_token_hash: string;
+}
+
 export interface LedgerEntry {
   traceId: string;
   event: string;
@@ -100,6 +113,7 @@ export interface LedgerRow {
   failure_category: string | null;
   duration_ms: number | null;
   error_class: string | null;
+  payload?: Record<string, unknown>;
   created_at: Date;
 }
 
@@ -113,6 +127,19 @@ function normalizePendingRow(row: Record<string, unknown>): PendingRow {
     ...row,
     payload: typeof payload === "string" ? (JSON.parse(payload) as Record<string, unknown>) : (payload as Record<string, unknown>),
   } as PendingRow;
+}
+
+function normalizeProposalRow(raw: Record<string, unknown>): ProposalRow {
+  const parse = (value: unknown): Record<string, unknown> => {
+    if (typeof value === "string") return JSON.parse(value) as Record<string, unknown>;
+    return value === null || value === undefined ? {} : (value as Record<string, unknown>);
+  };
+  return {
+    ...raw,
+    config: parse(raw["config"]),
+    evidence: parse(raw["evidence"]),
+    test_report: parse(raw["test_report"]),
+  } as ProposalRow;
 }
 
 export function createStore(sql: PgClient) {
@@ -291,12 +318,16 @@ export function createStore(sql: PgClient) {
 
     async recentFailures(limit = 20): Promise<LedgerRow[]> {
       const rows = await sql`
-        SELECT trace_id, event, tool, agent_version, status, outcome, failure_category, duration_ms, error_class, created_at
+        SELECT trace_id, event, tool, agent_version, status, outcome, failure_category, duration_ms, error_class, payload, created_at
         FROM event_ledger
         WHERE failure_category IS NOT NULL
         ORDER BY created_at DESC
         LIMIT ${limit}`;
-      return rows as unknown as LedgerRow[];
+      return rows.map((row) => {
+        const raw = row as Record<string, unknown>;
+        const payload = typeof raw["payload"] === "string" ? JSON.parse(String(raw["payload"])) : (raw["payload"] ?? {});
+        return { ...raw, payload } as unknown as LedgerRow;
+      });
     },
 
     async failureCategoryCounts(hours = 24): Promise<{ category: string; count: number }[]> {
@@ -323,6 +354,162 @@ export function createStore(sql: PgClient) {
         event: String((row as Record<string, unknown>)["event"]),
         count: Number((row as Record<string, unknown>)["count"]),
       }));
+    },
+
+    async ensureParserVersion(seedVersion: string, seedConfig: unknown): Promise<void> {
+      await sql`
+        INSERT INTO parse_configs (version, config)
+        VALUES (${seedVersion}, ${JSON.stringify(seedConfig)}::jsonb)
+        ON CONFLICT (version) DO UPDATE SET config = EXCLUDED.config`;
+      await sql`
+        INSERT INTO active_config (config_kind, active_version)
+        VALUES ('amount_parser', ${seedVersion})
+        ON CONFLICT (config_kind) DO NOTHING`;
+    },
+
+    async getActiveParserVersion(kind: "amount_parser"): Promise<string> {
+      const rows = await sql`SELECT active_version FROM active_config WHERE config_kind = ${kind}`;
+      const row = rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        await this.ensureParserVersion("parser_v1", { shorthand: [] });
+        return "parser_v1";
+      }
+      return String(row["active_version"]);
+    },
+
+    async getActiveParserConfig(kind: "amount_parser"): Promise<unknown> {
+      const version = await this.getActiveParserVersion(kind);
+      const rows = await sql`SELECT config FROM parse_configs WHERE version = ${version}`;
+      const row = rows[0] as Record<string, unknown> | undefined;
+      const raw = row ? row["config"] : null;
+      if (typeof raw === "string") return JSON.parse(raw) as unknown;
+      return raw ?? { shorthand: [] };
+    },
+
+    async insertParserConfig(version: string, config: unknown): Promise<void> {
+      await sql`
+        INSERT INTO parse_configs (version, config)
+        VALUES (${version}, ${JSON.stringify(config)}::jsonb)
+        ON CONFLICT (version) DO UPDATE SET config = EXCLUDED.config`;
+    },
+
+    async setActiveParserConfig(kind: "amount_parser", version: string): Promise<void> {
+      await sql`
+        INSERT INTO active_config (config_kind, active_version, updated_at)
+        VALUES (${kind}, ${version}, now())
+        ON CONFLICT (config_kind) DO UPDATE SET active_version = EXCLUDED.active_version, updated_at = now()`;
+    },
+
+    async listParserVersions(): Promise<{ version: string; created_at: Date; config: unknown }[]> {
+      const rows = await sql`SELECT version, created_at, config FROM parse_configs ORDER BY created_at`;
+      return rows.map((row) => {
+        const raw = row as Record<string, unknown>;
+        const config = typeof raw["config"] === "string" ? JSON.parse(String(raw["config"])) : raw["config"];
+        return { version: String(raw["version"]), created_at: raw["created_at"] as Date, config };
+      });
+    },
+
+    async applyCustomerPayment(
+      ownerPhone: string,
+      customerId: string,
+      amount: number,
+      currency: string,
+    ): Promise<{ applied: number; outstanding: number; payments: { debtId: string; applied: number }[] }> {
+      const payments: { debtId: string; applied: number }[] = [];
+      let remaining = amount;
+      const open = (await sql`
+        SELECT id, amount_due, amount_paid FROM debts
+        WHERE owner_phone = ${ownerPhone} AND customer_id = ${customerId}
+          AND amount_paid < amount_due AND amount_due > 0
+        ORDER BY created_at, id`) as unknown as { id: string; amount_due: number; amount_paid: number }[];
+      for (const debt of open) {
+        if (remaining <= 0) break;
+        const due = Number(debt.amount_due);
+        const paid = Number(debt.amount_paid);
+        const toApply = Math.min(remaining, Math.round((due - paid) * 100) / 100);
+        if (toApply <= 0) continue;
+        await sql`UPDATE debts SET amount_paid = amount_paid + ${toApply} WHERE id = ${debt.id}`;
+        payments.push({ debtId: debt.id, applied: toApply });
+        remaining = Math.round((remaining - toApply) * 100) / 100;
+      }
+      const balance = await this.customerBalance(ownerPhone, customerId);
+      return { applied: Math.round((amount - remaining) * 100) / 100, outstanding: balance.outstanding, payments };
+    },
+
+    async saveProposal(entry: {
+      version: string;
+      config: unknown;
+      rationale: string;
+      evidence: unknown;
+      diagnosis: string;
+      testsPassed: boolean;
+      testReport: unknown;
+      approvalTokenHash: string;
+    }): Promise<string> {
+      const rows = await sql`
+        INSERT INTO improvement_proposals
+          (version, config, rationale, evidence, diagnosis, tests_passed, test_report, status, approval_token_hash)
+        VALUES (
+          ${entry.version}, ${JSON.stringify(entry.config)}::jsonb, ${entry.rationale},
+          ${JSON.stringify(entry.evidence)}::jsonb, ${entry.diagnosis},
+          ${entry.testsPassed}, ${JSON.stringify(entry.testReport)}::jsonb, 'pending', ${entry.approvalTokenHash})
+        RETURNING id`;
+      return String((rows[0] as Record<string, unknown>)["id"]);
+    },
+
+    async getProposal(id: string): Promise<ProposalRow | null> {
+      const rows = await sql`SELECT id, version, config, rationale, evidence, diagnosis, tests_passed, test_report, status, approval_token_hash, created_at
+        FROM improvement_proposals WHERE id = ${id}`;
+      const raw = rows[0] as Record<string, unknown> | undefined;
+      return raw ? normalizeProposalRow(raw) : null;
+    },
+
+    async approveProposal(id: string, tokenHash: string): Promise<ProposalRow | null> {
+      const rows = await sql`
+        UPDATE improvement_proposals
+        SET status = 'approved', decided_at = now()
+        WHERE id = ${id} AND status = 'pending' AND approval_token_hash = ${tokenHash}
+        RETURNING id, version, config, rationale, evidence, diagnosis, tests_passed, test_report, status, approval_token_hash, created_at`;
+      const raw = rows[0] as Record<string, unknown> | undefined;
+      return raw ? normalizeProposalRow(raw) : null;
+    },
+
+    async setProposalStatus(id: string, status: "rejected" | "discarded"): Promise<void> {
+      await sql`UPDATE improvement_proposals SET status = ${status}, decided_at = now() WHERE id = ${id}`;
+    },
+
+    async latestPendingProposal(): Promise<ProposalRow | null> {
+      const rows = await sql`
+        SELECT id, version, config, rationale, evidence, diagnosis, tests_passed, test_report, status, approval_token_hash, created_at
+        FROM improvement_proposals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1`;
+      const raw = rows[0] as Record<string, unknown> | undefined;
+      return raw ? normalizeProposalRow(raw) : null;
+    },
+
+    async insertImprovementAudit(entry: {
+      action: string;
+      version?: string;
+      proposalId?: string;
+      actor: string;
+      detail?: unknown;
+    }): Promise<void> {
+      await sql`
+        INSERT INTO improvement_audit (action, version, proposal_id, actor, detail)
+        VALUES (${entry.action}, ${entry.version ?? null}, ${entry.proposalId ?? null}, ${entry.actor}, ${JSON.stringify(entry.detail ?? {})}::jsonb)`;
+    },
+
+    async improvementAuditTrail(limit = 10): Promise<{ action: string; version: string | null; actor: string; created_at: Date }[]> {
+      const rows = await sql`
+        SELECT action, version, actor, created_at FROM improvement_audit
+        ORDER BY created_at DESC LIMIT ${limit}`;
+      return rows.map((row) => {
+        const raw = row as Record<string, unknown>;
+        return { action: String(raw["action"]), version: (raw["version"] as string | null) ?? null, actor: String(raw["actor"]), created_at: raw["created_at"] as Date };
+      });
+    },
+
+    async configAuditTrail(limit = 10): Promise<{ action: string; version: string | null; actor: string; created_at: Date }[]> {
+      return this.improvementAuditTrail(limit);
     },
   };
 }

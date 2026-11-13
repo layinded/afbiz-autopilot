@@ -11,7 +11,10 @@
     "dev": "tsx watch --env-file-if-exists=.env agent/index.ts",
     "start": "tsx --env-file-if-exists=.env agent/index.ts",
     "db:setup": "tsx --env-file-if-exists=.env scripts/db-setup.ts",
-    "failures": "tsx --env-file-if-exists=.env scripts/failures.ts"
+    "failures": "tsx --env-file-if-exists=.env scripts/failures.ts",
+    "improve": "tsx --env-file-if-exists=.env scripts/improve.ts",
+    "approve": "tsx --env-file-if-exists=.env scripts/approve.ts",
+    "rollback": "tsx --env-file-if-exists=.env scripts/rollback.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.13",

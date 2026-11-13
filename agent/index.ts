@@ -20,6 +20,7 @@ import { createSupervisorAgent, supervisorInstructions } from "./agent.js";
 import { createChatModel } from "./model.js";
 import { createPostHogObservability } from "../integrations/posthog.js";
 import { createEmitter } from "../lib/observability.js";
+import { bindParserConfigStore } from "../lib/parser-config.js";
 import { createWhatsAppChannel } from "../integrations/whatsapp/channel.js";
 
 export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Promise<void> }> {
@@ -29,6 +30,8 @@ export async function main(): Promise<{ voltagent: VoltAgent; dispose: () => Pro
   const sql = createDb(config.databaseUrl);
   const store = createStore(sql);
   await store.probe();
+  bindParserConfigStore(store);
+  await store.ensureParserVersion("parser_v1", { shorthand: [] });
   logger.info("db_connected", { databaseHost: new URL(config.databaseUrl).host, agentVersion: config.agentVersion });
 
   const observability = createPostHogObservability({

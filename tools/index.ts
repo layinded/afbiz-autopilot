@@ -59,8 +59,8 @@ interface AmountCheck {
   currency: string;
 }
 
-function checkAmount(raw: string): { parsed: AmountCheck } | { fail: Record<string, unknown> } {
-  const result = parseAmountOrMessage(raw);
+async function checkAmount(raw: string): Promise<{ parsed: AmountCheck } | { fail: Record<string, unknown> }> {
+  const result = await parseAmountOrMessage(raw);
   if (result.ok) return { parsed: result };
   return { fail: { ok: false, error: "amount_unparsable", message: result.error.message } };
 }
@@ -113,6 +113,23 @@ export async function applyConfirmedPending(
       ok: true,
       recordId: debt.id,
       message: `Debt recorded: ${customer.name} owes ${fmtMoney(debt.amount_due)} (balance ${fmtMoney(balance.outstanding)}).`,
+    };
+  }
+  if (pending.tool === "record_customer_payment") {
+    const customer = await store.upsertCustomer(owner, String(pending.payload["customer_name"]));
+    const payment = await store.applyCustomerPayment(
+      owner,
+      customer.id,
+      Number(pending.payload["amount"]),
+      String(pending.payload["currency"]),
+    );
+    if (payment.applied < Number(pending.payload["amount"])) {
+      throw new Error("payment no longer fits the outstanding balance - nothing was changed");
+    }
+    return {
+      ok: true,
+      recordId: payment.payments[0]?.debtId,
+      message: `Payment recorded: ${customer.name} paid ${fmtMoney(payment.applied)}, balance now ${fmtMoney(payment.outstanding)}.`,
     };
   }
   throw new Error(`unknown pending tool: ${pending.tool}`);
@@ -175,7 +192,7 @@ export function createBusinessTools(store: Store, options: BusinessToolsOptions)
       const { userId, traceId } = traceOf(opOptions);
       try {
         if (!userId) return sessionMissing();
-        const parsed = checkAmount(args.amount_raw);
+        const parsed = await checkAmount(args.amount_raw);
         if (!("parsed" in parsed)) {
           logger.warn("parse_failed", { traceId, tool: "record_sale", reason: "unparsable" });
           await emitTool(traceId, "record_sale", started, "failure", {
@@ -236,7 +253,7 @@ export function createBusinessTools(store: Store, options: BusinessToolsOptions)
       const { userId, traceId } = traceOf(opOptions);
       try {
         if (!userId) return sessionMissing();
-        const parsed = checkAmount(args.amount_raw);
+        const parsed = await checkAmount(args.amount_raw);
         if (!("parsed" in parsed)) {
           logger.warn("parse_failed", { traceId, tool: "record_expense", reason: "unparsable" });
           await emitTool(traceId, "record_expense", started, "failure", {
@@ -296,7 +313,7 @@ export function createBusinessTools(store: Store, options: BusinessToolsOptions)
       const { userId, traceId } = traceOf(opOptions);
       try {
         if (!userId) return sessionMissing();
-        const parsed = checkAmount(args.amount_raw);
+        const parsed = await checkAmount(args.amount_raw);
         if (!("parsed" in parsed)) {
           logger.warn("parse_failed", { traceId, tool: "record_debt", reason: "unparsable" });
           await emitTool(traceId, "record_debt", started, "failure", {
@@ -479,7 +496,104 @@ export function createBusinessTools(store: Store, options: BusinessToolsOptions)
     },
   });
 
-  return { tools: [recordSale, recordExpense, recordDebt, getBusinessSummary, getCustomerBalance], recordSale, recordExpense, recordDebt, getBusinessSummary, getCustomerBalance };
+  const recordCustomerPayment = createTool({
+    name: "record_customer_payment",
+    description:
+      "Record money a customer paid against what they owe. ALWAYS requires the owner's explicit confirm before it is applied - it changes outstanding debt balances. Pass the raw amount text in amount_raw.",
+    parameters: z.object({
+      customer_name: z.string().min(1),
+      description: z.string().min(1).optional().describe("Optional note, e.g. 'from what she owes'"),
+      amount_raw: z.string().min(1),
+    }),
+    execute: async (args, opOptions) => {
+      const started = Date.now();
+      const { userId, traceId } = traceOf(opOptions);
+      try {
+        if (!userId) return sessionMissing();
+        const parsed = await checkAmount(args.amount_raw);
+        if (!("parsed" in parsed)) {
+          logger.warn("parse_failed", { traceId, tool: "record_customer_payment", reason: "unparsable" });
+          await emitTool(traceId, "record_customer_payment", started, "failure", {
+            failureCategory: "amount_parsing",
+            ledgerExtra: { raw_input: args.amount_raw },
+          });
+          return { ...parsed.fail, meta: { durationMs: Date.now() - started } };
+        }
+        const { value, currency } = parsed.parsed;
+        const exact = await store.findCustomer(userId, args.customer_name);
+        if (!exact) {
+          const similar = await store.listSimilarCustomers(userId, args.customer_name);
+          if (similar.length > 0) {
+            const first = similar[0]!;
+            await emitTool(traceId, "record_customer_payment", started, "failure", {
+              failureCategory: "missing_information",
+              outcome: "suggestions_offered",
+            });
+            return {
+              ok: false,
+              error: "customer_not_found",
+              suggestions: similar.map((c) => c.name),
+              message: `No customer named "${args.customer_name}" yet. Did you mean: ${first.name} (owes ...)? Confirm which customer paid.`,
+            };
+          }
+          await emitTool(traceId, "record_customer_payment", started, "failure", {
+            failureCategory: "missing_information",
+            outcome: "customer_unknown",
+          });
+          return { ok: false, error: "customer_not_found", message: `No customer named "${args.customer_name}" in your records yet.` };
+        }
+        const balance = await store.customerBalance(userId, exact.id);
+        if (balance.outstanding <= 0) {
+          await emitTool(traceId, "record_customer_payment", started, "failure", {
+            failureCategory: "missing_information",
+            outcome: "nothing_outstanding",
+          });
+          return { ok: false, error: "payment_exceeds_outstanding", message: `${exact.name} owes nothing right now, so there is nothing to record against.` };
+        }
+        if (value > balance.outstanding) {
+          await emitTool(traceId, "record_customer_payment", started, "failure", {
+            failureCategory: "missing_information",
+            outcome: "overpayment_attempt",
+          });
+          return {
+            ok: false,
+            error: "payment_exceeds_outstanding",
+            message: `₦-input "${fmtMoney(value)}" exceeds what ${exact.name} owes (${fmtMoney(balance.outstanding)}). Restate the paid amount.`,
+          };
+        }
+        const pending = await store.createPending(
+          userId,
+          "record_customer_payment",
+          { customer_name: args.customer_name, description: args.description ?? null, amount: value, currency, customer_id: exact.id },
+          `record_customer_payment ${exact.name} — ${fmtMoney(value)}`,
+        );
+        logger.info("confirmation_required", { traceId, tool: "record_customer_payment", pendingId: pending.id, customer: exact.name });
+        await emitTool(traceId, "record_customer_payment", started, "info", {
+          outcome: "confirmation_required",
+        });
+        return {
+          ok: false,
+          confirmation_required: true,
+          pending_id: pending.id,
+          customer: exact.name,
+          balance: balance.outstanding,
+          message: `Record ${fmtMoney(value)} paid by ${exact.name}, reducing their ${fmtMoney(balance.outstanding)} debt? ${confirmMessage}`,
+        };
+      } catch (error) {
+        return await safeToolError("record_customer_payment", started, traceId, error);
+      }
+    },
+  });
+
+  return {
+    tools: [recordSale, recordExpense, recordDebt, recordCustomerPayment, getBusinessSummary, getCustomerBalance],
+    recordSale,
+    recordExpense,
+    recordDebt,
+    recordCustomerPayment,
+    getBusinessSummary,
+    getCustomerBalance,
+  };
 }
 
 // `todayOf` remains part of the tool-context contract for Phase 4 (context "today"),

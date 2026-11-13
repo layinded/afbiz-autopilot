@@ -231,6 +231,7 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
             status: "info",
             outcome: "clarification_request",
             failureCategory: "missing_information",
+            ledgerExtra: { raw_input: message.text.slice(0, 200), reply_preview: text.slice(0, 120) },
           });
         } else if (replyClass === "unsupported_request") {
           await emitter?.emit("agent_task_completed", {

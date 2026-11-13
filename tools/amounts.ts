@@ -1,13 +1,12 @@
 /**
- * The amount parser - THE versioned seam the self-improvement loop will target
- * in a later phase. Phase 2 deliberately handles Meta-typical written forms:
- * "₦45,000", "45,000", "45000", "₦12,000.50", bare decimals.
- *
- * KNOWN LIMITATION (intentional, seeded for the later improvement demo): the
- * "k"/"m" shorthand ("5k" = 5000) is NOT parsed - it fails with reason
- * "unparsable". Do not "fix" this here casually; the improvement loop's
- * regression suite owns that change.
+ * The amount parser - THE versioned seam the self-improvement loop targets.
+ * The active configuration (from PostgreSQL, TTL-cached) decides which forms
+ * are valid; the baseline v1 deliberately rejects "k"/"m" shorthand ("5k"),
+ * which is the seed of the Phase 4 improvement demonstration. parseAmount()
+ * reads the active config; tests and proposals use parseAmountWithConfig().
  */
+import { getActiveParserConfig, type AmountParserConfig } from "../lib/parser-config.js";
+
 export type CurrencyCode = "NGN";
 
 export type ParsedAmount =
@@ -33,37 +32,69 @@ const FAIL_MESSAGES: Record<AmountFailReason, (raw: string) => string> = {
   too_large: (raw) => `"${raw}" is above the recordable limit (₦1,000,000,000). Check the amount.`,
 };
 
-export function parseAmount(raw: string): ParsedAmount {
-  const trimmed = (raw ?? "").trim();
-  if (!trimmed) {
-    return { ok: false, raw: "", reason: "empty", message: FAIL_MESSAGES["empty"]("") };
-  }
-  if (/[$€£¥]/.test(trimmed) || /\b(?:USD|EUR|GBP|JPY|KES|GHS|ZAR)\b/i.test(trimmed)) {
-    return { ok: false, raw: trimmed, reason: "unsupported_currency", message: FAIL_MESSAGES["unsupported_currency"](trimmed) };
-  }
+function fail(reason: AmountFailReason, raw: string): ParsedAmount & { ok: false } {
+  return { ok: false, raw, reason, message: FAIL_MESSAGES[reason](raw) };
+}
+
+function normalizeForm(trimmed: string): { digits: string; currencyFail?: ParsedAmount & { ok: false } } {
   let s = trimmed;
+  if (/[$€£¥]/.test(s) || /\b(?:USD|EUR|GBP|JPY|KES|GHS|ZAR)\b/i.test(s)) {
+    return { digits: "", currencyFail: fail("unsupported_currency", trimmed) };
+  }
   s = s.replace(/^₦\s*/u, "");
   s = s.replace(/^NGN\s*/i, "").replace(/\s*NGN$/i, "");
   s = s.replaceAll(",", "").replaceAll(/\s+/g, "");
-  if (!/^\d+(?:\.\d{1,2})?$/.test(s)) {
-    return { ok: false, raw: trimmed, reason: "unparsable", message: FAIL_MESSAGES["unparsable"](trimmed) };
+  return { digits: s };
+}
+
+function applyShorthand(digits: string, config: AmountParserConfig): { value: number; matched: boolean } {
+  const shorthandMatch = /^(\d+(?:\.\d+)?)([a-z])$/i.exec(digits);
+  if (!shorthandMatch) {
+    return { value: Number.NaN, matched: false };
   }
-  const value = Math.round(Number(s) * 100) / 100;
-  if (!Number.isFinite(value)) {
-    return { ok: false, raw: trimmed, reason: "unparsable", message: FAIL_MESSAGES["unparsable"](trimmed) };
+  const suffix = (shorthandMatch[2] ?? "").toLowerCase();
+  const rule = config.shorthand.find((r) => r.suffix === suffix);
+  if (!rule) {
+    return { value: Number.NaN, matched: false };
   }
-  if (value <= 0) {
-    return { ok: false, raw: trimmed, reason: "non_positive", message: FAIL_MESSAGES["non_positive"](trimmed) };
+  const baseDigit = shorthandMatch[1] ?? "";
+  const value = Math.round(Number(baseDigit) * rule.factor * 100) / 100;
+  return { value, matched: true };
+}
+
+export function parseAmountWithConfig(raw: string, config: AmountParserConfig): ParsedAmount {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return fail("empty", "");
+
+  const { digits, currencyFail } = normalizeForm(trimmed);
+  if (currencyFail) return currencyFail;
+
+  let value: number;
+  if (/^\d+(?:\.\d{1,2})?$/.test(digits)) {
+    value = Number(digits);
+  } else {
+    const shorthand = applyShorthand(digits, config);
+    if (!shorthand.matched || !Number.isFinite(shorthand.value)) {
+      return fail("unparsable", trimmed);
+    }
+    value = shorthand.value;
   }
-  if (value > MAX_AMOUNT) {
-    return { ok: false, raw: trimmed, reason: "too_large", message: FAIL_MESSAGES["too_large"](trimmed) };
-  }
+
+  if (!Number.isFinite(value)) return fail("unparsable", trimmed);
+  if (value <= 0) return fail("non_positive", trimmed);
+  if (value > MAX_AMOUNT) return fail("too_large", trimmed);
   return { ok: true, value, currency: DEFAULT_CURRENCY };
 }
 
-export function parseAmountOrMessage(
+/** Reads the ACTIVE parser configuration (PostgreSQL pointer, TTL cache). */
+export async function parseAmount(raw: string): Promise<ParsedAmount> {
+  const config = await getActiveParserConfig();
+  return parseAmountWithConfig(raw, config);
+}
+
+export async function parseAmountOrMessage(
   raw: string,
-): { ok: true; value: number; currency: CurrencyCode } | { ok: false; error: Extract<ParsedAmount, { ok: false }> } {
-  const result = parseAmount(raw);
+): Promise<{ ok: true; value: number; currency: CurrencyCode } | { ok: false; error: Extract<ParsedAmount, { ok: false }> }> {
+  const result = await parseAmount(raw);
   return result.ok ? { ok: true, value: result.value, currency: result.currency } : { ok: false, error: result };
 }

@@ -30,6 +30,11 @@ async function main(): Promise<void> {
   try {
     const applied = await applySchema(sql);
     logger.info("schema_applied", { database: databaseName, statements: applied });
+
+    const storeCreator = await import("../db/store.js");
+    const store = storeCreator.createStore(sql);
+    await store.ensureParserVersion("parser_v1", { shorthand: [] });
+    logger.info("parser_baseline_seeded", { version: "parser_v1" });
   } finally {
     await sql.end({ timeout: 5 });
   }
