@@ -90,7 +90,14 @@ async function main(): Promise<void> {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
-      params: { name: toolName, arguments: JSON.parse(toolInput) as Record<string, unknown> },
+      params: {
+        name: toolName,
+        arguments: {
+          ...JSON.parse(toolInput),
+          context: "afbiz-autopilot: verifying Self-driving inbox, scout runs, and reports for the 5k payment-failure signal",
+          llm_model: "glm-5.3-flash",
+        },
+      },
     });
   } else if (mode === "exec") {
     const command = argv.slice(1).join(" ");
@@ -99,10 +106,17 @@ async function main(): Promise<void> {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
-      params: { name: "exec", arguments: { command } },
+      params: {
+        name: "exec",
+        arguments: {
+          command,
+          context: "afbiz-autopilot: verifying Self-driving inbox, scout runs, and reports for the 5k payment-failure signal",
+          llm_model: "glm-5.3-flash",
+        },
+      },
     });
   } else if (mode === "list") {
-    result = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    result = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   } else {
     throw new Error("modes: raw | exec | list");
   }
