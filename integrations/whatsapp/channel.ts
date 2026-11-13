@@ -235,6 +235,14 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
       if (turn.settled === "result" && turn.toolCalls === 0) {
         const replyClass = classifyReplyWithoutTool(text);
         if (replyClass === "missing_information") {
+          await emitter?.emit("agent_task_failed", {
+            traceId,
+            status: "failure",
+            outcome: "intent_unresolved_clarification",
+            failureCategory: "missing_information",
+            durationMs: turn.durationMs,
+            ledgerExtra: { raw_input: message.text.slice(0, 200), reply_preview: text.slice(0, 120) },
+          });
           await emitter?.emit("agent_clarification_required", {
             traceId,
             status: "info",
@@ -243,11 +251,13 @@ export function createWhatsAppChannel(options: WhatsAppChannelOptions): WhatsApp
             ledgerExtra: { raw_input: message.text.slice(0, 200), reply_preview: text.slice(0, 120) },
           });
         } else if (replyClass === "unsupported_request") {
-          await emitter?.emit("agent_task_completed", {
+          await emitter?.emit("agent_task_failed", {
             traceId,
-            status: "info",
+            status: "failure",
             outcome: "unsupported_request",
+            failureCategory: "unsupported_request",
             durationMs: turn.durationMs,
+            ledgerExtra: { raw_input: message.text.slice(0, 200) },
           });
         } else {
           await emitter?.emit("agent_task_completed", {

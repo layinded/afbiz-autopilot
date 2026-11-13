@@ -148,8 +148,9 @@ describe("brief Test C: unsupported request", () => {
     );
     await observability.flush();
 
-    const outcome = await getSql()`SELECT outcome FROM event_ledger WHERE event = 'agent_task_completed' LIMIT 1`;
+    const outcome = await getSql()`SELECT outcome, failure_category FROM event_ledger WHERE event = 'agent_task_failed' LIMIT 1`;
     expect(String((outcome[0] as Record<string, unknown>)["outcome"])).toBe("unsupported_request");
+    expect(String((outcome[0] as Record<string, unknown>)["failure_category"])).toBe("unsupported_request");
     expect(await getSql()`SELECT id FROM sales`).toHaveLength(0);
     expect(await getSql()`SELECT id FROM expenses`).toHaveLength(0);
   });
