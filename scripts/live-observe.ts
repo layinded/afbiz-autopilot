@@ -9,7 +9,7 @@
  *
  *   npx tsx --env-file-if-exists=.env scripts/live-observe.ts --wait 120
  */
-import { sleep } from "node:timers/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { writeSync } from "node:fs";
 import { createDb } from "../db/client.js";
 import { createStore, type LedgerRow } from "../db/store.js";
